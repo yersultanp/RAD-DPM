@@ -1,0 +1,32 @@
+[
+  {
+    "image_path": "data/teacher_images/image_00000_0.png",
+    "prompt": "a dog playing in a park",
+    "prompt_id": 0,
+    "image_id": 0
+  },
+  {
+    "image_path": "data/teacher_images/image_00001_0.png",
+    "prompt": "a cat sleeping on a sofa",
+    "prompt_id": 1,
+    "image_id": 0
+  },
+  {
+    "image_path": "data/teacher_images/image_00002_0.png",
+    "prompt": "a bird flying in the sky",
+    "prompt_id": 2,
+    "image_id": 0
+  },
+  {
+    "image_path": "data/teacher_images/image_00003_0.png",
+    "prompt": "a car driving on a road",
+    "prompt_id": 3,
+    "image_id": 0
+  },
+  {
+    "image_path": "data/teacher_images/image_00004_0.png",
+    "prompt": "a flower in a vase",
+    "prompt_id": 4,
+    "image_id": 0
+  }
+]

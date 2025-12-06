@@ -27,7 +27,7 @@ def teacher_noise_pred(unet, x_t, t, cond):
         ).sample
 
 def encode_image_to_latent(vae, image):
-    return vae.encode(image).latent_dist.sample()
+    return vae.encode(image).latent_dist.sample
 
 def decode_latent_to_image(vae, lat):
-    return vae.decode(lat).sample()
+    return vae.decode(lat).sample

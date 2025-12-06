@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from configs.model_config import ModelConfig
 
 class LearnedStepScheduler(nn.Module):
     """
@@ -56,3 +57,29 @@ class LearnedStepScheduler(nn.Module):
             all_timesteps.append(t)
 
         return torch.cat(all_timesteps, dim=0).view(batch_size, self.num_steps)
+
+
+
+class SchedulerMLP(nn.Module):
+    def __init__(self, stat_dim, cond_dim, hidden_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(stat_dim + cond_dim + 1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, stats, step_idx, cond):
+        step_norm = step_idx / 10.0
+        x = torch.cat([stats, cond, step_norm.unsqueeze(0)], dim=-1)
+        return self.net(x)
+
+
+def build_scheduler(cond_dim):
+    cfg = ModelConfig()
+    return SchedulerMLP(
+        stat_dim=cfg.latent_stat_dim,
+        cond_dim=cond_dim,
+        hidden_dim=cfg.scheduler_hidden_dim
+    )

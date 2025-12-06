@@ -1,2 +1,2 @@
-# Adversarial-Diffusion-Distillation
-Implementing Adversarial Diffusion Distillation with  Teacher Model
+# Adaptive Sampling Scheduler for Diffusion Models
+Implementing Diffusion Distillation with Adaptive Scheduler

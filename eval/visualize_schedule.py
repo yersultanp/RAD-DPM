@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.cuda.amp import autocast
 
-def visualize_schedule(student, diff_handler, pipe, train_data, loss_history, schedule_history, K_STEPS, idx = 0):
+def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_history, schedule_history, K_STEPS, idx = 0):
 
     plt.figure(figsize=(12, 4))
     plt.subplot(1, 2, 1)
@@ -20,12 +20,12 @@ def visualize_schedule(student, diff_handler, pipe, train_data, loss_history, sc
     plt.title("Learned Timestep Evolution")
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.savefig(f"./results/scheduling_prompt_{idx}")
 
     print("Generating Final Comparison...")
     with torch.no_grad():
         with autocast():
-            data = train_data[0]
+            data = train_data[idx]
             latents = data["noise"].clone()
             for k in range(K_STEPS):
                 t_curr = student(k, latents)
@@ -48,4 +48,4 @@ def visualize_schedule(student, diff_handler, pipe, train_data, loss_history, sc
         plt.figure(figsize=(10, 5))
         plt.subplot(1, 2, 1); plt.imshow(img_teacher); plt.title("Teacher"); plt.axis("off")
         plt.subplot(1, 2, 2); plt.imshow(img_student); plt.title("Student"); plt.axis("off")
-    plt.show()
+    plt.savefig(f"./results/target_compare_prompt_{idx}")

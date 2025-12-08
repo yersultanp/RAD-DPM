@@ -28,13 +28,21 @@ class RobustLearnedScheduler(nn.Module):
         # 2. Hardcoded "Safe" Linear Schedule (The "Anchor")
         # If we want 4 steps, standard is: 1000 -> 750 -> 500 -> 250 -> 0
         # We register this as a buffer so it's not a trainable parameter
-        linear_schedule = np.linspace(1000, 0, num_steps + 1)[:-1] # [1000, 750, 500, 250]
+        timesteps = np.linspace(1, 0, num_steps + 1)[:-1] 
+
+        # 2. Square it (Quadratic curve) to push values lower
+        # e.g., 0.5 becomes 0.25
+        timesteps = timesteps ** 2 
+
+        # 3. Scale back to 1000
+        # Result: [1000, 562, 250, 62]
+        linear_schedule = timesteps * 1000
         self.register_buffer("default_schedule", torch.tensor(linear_schedule, dtype=torch.float32))
 
         # 3. Learnable Scale
         # Controls how much the network is allowed to deviate from the default.
         # Initialize small so training starts stable!
-        self.deviation_scale = nn.Parameter(torch.tensor(250.0))
+        self.deviation_scale = nn.Parameter(torch.tensor(80.0))
 
     def forward(self, step_idx, latents):
         # A. Get the "Safe" Default Value for this step

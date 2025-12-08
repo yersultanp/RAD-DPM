@@ -4,12 +4,28 @@ from configs.scheduler_config import SchedulerConfig
 from configs.train_config import TrainConfig
 
 def extract_latent_stats(latents):
+    # latents shape: [Batch, 4, 64, 64]
+    
+    # 1. Mean (Global Shift)
     mean = latents.mean(dim=[1, 2, 3], keepdim=True).squeeze(-1).squeeze(-1)
+    
+    # 2. Std (Global Contrast/Variance - critical for diffusion)
     std = latents.std(dim=[1, 2, 3], keepdim=True).squeeze(-1).squeeze(-1)
-    energy = (latents**2).mean(dim=[1, 2, 3], keepdim=True).squeeze(-1).squeeze(-1)
-    maxval = latents.max(dim=[1, 2, 3], keepdim=True).values.squeeze(-1).squeeze(-1)
-    return torch.cat([mean, std, energy, maxval], dim=1)
+    
+    # 3. Robust Max (95th Percentile) - Stable measurement of dynamic range
+    # We flatten the spatial dims to compute quantile
+    b, c, h, w = latents.shape
+    flat = latents.view(b, -1)
+    # kthvalue is faster than quantile for tensors
+    k = int(0.95 * flat.shape[1])
+    p95 = torch.kthvalue(flat, k, dim=1).values.unsqueeze(1)
+    
+    # 4. Center Magnitude (L1 Norm centered)
+    # This helps distinguish "Gaussian noise" from "Sparse Image Edges"
+    l1_mag = (latents - mean.unsqueeze(-1).unsqueeze(-1)).abs().mean(dim=[1, 2, 3])
+    l1_mag = l1_mag.unsqueeze(1)
 
+    return torch.cat([mean, std, p95, l1_mag], dim=1)
 
 class DifferentiableDiffusionHandler:
     def __init__(self, pipe):

@@ -9,8 +9,7 @@ from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 
 
-def generate_teacher_target(pipe, text_emb, device):
-    prompts = [f"A photo of object {i}" for i in range(ModelConfig.NUM_TEACHER_SAMPLES)]
+def generate_teacher_target(pipe, prompts, device):
     train_data = []
 
     print("Pre-computing Teacher Targets (float16)...")

@@ -54,7 +54,9 @@ def evaluation_pipeline(pipe, diff_handler, student, prompts, K_STEPS, DEVICE="c
     # ============================================
     print("Generating Student (Learned Schedule + LoRA Refiner)...")
     student_imgs = []
-
+    null_emb = pipe.text_encoder(
+    pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).input_ids.to(DEVICE)
+    )[0]
     encoded_prompts = []
     with torch.no_grad():
         for p in prompts:
@@ -64,6 +66,7 @@ def evaluation_pipeline(pipe, diff_handler, student, prompts, K_STEPS, DEVICE="c
     with torch.no_grad():
         with autocast():
             for i, text_emb in enumerate(encoded_prompts):
+                cfg_text_emb = torch.cat([null_emb, text_emb])
                 latents = randn_tensor((1, 4, 64, 64), device=DEVICE, generator=generator, dtype=text_emb.dtype)
 
                 # 2. Run the Student Loop
@@ -86,7 +89,7 @@ def evaluation_pipeline(pipe, diff_handler, student, prompts, K_STEPS, DEVICE="c
                         t_next = torch.zeros_like(t_curr)
 
                     # Differentiable Step (Uses pipe.unet, which now has adapters toggled correctly)
-                    latents = diff_handler.step(latents, t_curr, t_next, text_emb)
+                    latents = diff_handler.step(latents, t_curr, t_next, cfg_text_emb, guidance_scale = 7.5)
 
                 # 3. Decode Logic
                 latents = 1 / 0.18215 * latents

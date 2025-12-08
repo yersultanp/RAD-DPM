@@ -100,7 +100,7 @@ def main():
                     else:
                         t_next = torch.zeros_like(t_curr)
 
-                    student_latents = diff_handler.step(student_latents, t_curr, t_next, text_emb)
+                    student_latents = diff_handler.step(student_latents, t_curr, t_next, text_emb, guidance_scale=1.0)
 
                 # 2. Compute Loss (in fp16/fp32 automatically handled)
                 loss = loss_fn(student_latents, target_latents)
@@ -163,7 +163,7 @@ def main():
                         t_next = student(k+1, latents)
                         # Clamp logic
                         t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
-                        latents = diff_handler.step(latents, t_curr, t_next, text_emb)
+                        latents = diff_handler.step(latents, t_curr, t_next, text_emb, guidance_scale=1.0)
 
                 # B. The Final Step (Refinement)
                 # Now we ENABLE LoRA. This is the only step we train.
@@ -176,7 +176,7 @@ def main():
                 # FIX: Blind Training. Use null_emb instead of text_emb.
                 # This forces LoRA to look at pixels, avoiding prompt overfitting.
                 # We use the diff_handler to execute the step WITH gradients.
-                refined_latents = diff_handler.step(latents, t_curr, t_next, null_emb)
+                refined_latents = diff_handler.step(latents, t_curr, t_next, null_emb, guidance_scale=1.0)
 
                 # Compute loss
                 loss = F.mse_loss(refined_latents, target_latents)

@@ -49,32 +49,38 @@ class DifferentiableDiffusionHandler:
         alpha_t = alpha_t ** 0.5
         return alpha_t, sigma_t
 
-    def step(self, latents, t_now, t_next, text_emb, guidance_scale = 7.5):
-        # Classifier-Free Guidance
-        # 1. Expand latents for CFG (Batch size * 2)
-        latents_input = torch.cat([latents] * 2)
-        t_input = torch.cat([t_now] * 2)
+    def step(self, latents, t_now, t_next, text_emb, guidance_scale=1.0):
+        # Check if we are doing CFG (Inference) or Standard (Training)
+        do_classifier_free_guidance = guidance_scale > 1.0
+        
+        if do_classifier_free_guidance:
+            # --- INFERENCE MODE (CFG) ---
+            # 1. Expand inputs
+            latents_input = torch.cat([latents] * 2)
+            # Ensure t is 1D [2]
+            t_input = torch.cat([t_now] * 2).view(-1) 
+            
+            # 2. Predict
+            noise_pred = self.unet(latents_input, t_input, encoder_hidden_states=text_emb).sample
+            
+            # 3. Guide
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            
+        else:
+            # --- TRAINING MODE (Standard) ---
+            # 1. No Expansion
+            latents_input = latents
+            t_input = t_now.view(-1) # Ensure 1D
+            
+            # 2. Predict (Single pass)
+            noise_pred = self.unet(latents_input, t_input, encoder_hidden_states=text_emb).sample
 
-        # 2. Predict Noise (Unconditional + Conditional)
-        # We assume text_emb has both [uncond, cond] stacked
-        noise_pred = self.unet(latents_input, t_input, encoder_hidden_states=text_emb).sample
-
-        # 3. Perform Guidance
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
+        # --- INTEGRATION (DDIM) ---
         alpha_now, sigma_now = self.get_alpha_sigma(t_now)
         alpha_next, _ = self.get_alpha_sigma(t_next)
 
-        # UNet expects float16 if loaded in float16
-        # t needs to be passed as float16 for the embedding layer if strictly typed
-
-        # NOTE: diffusers UNet `sample` method handles the casting if using autocast
-        noise_pred = self.unet(latents, t_now.squeeze(), encoder_hidden_states=text_emb).sample
-
-        # Cast back to match latents if needed (usually handled by autocast)
-        noise_pred = noise_pred.to(dtype=latents.dtype)
-
+        # DDIM Update Rule
         pred_x0 = (latents - sigma_now * noise_pred) / alpha_now
         dir_xt = (1 - alpha_next**2)**0.5 * noise_pred
         prev_latents = alpha_next * pred_x0 + dir_xt

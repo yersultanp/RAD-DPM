@@ -5,13 +5,13 @@ from configs.train_config import TrainConfig
 
 def extract_latent_stats(latents):
     # latents shape: [Batch, 4, 64, 64]
-    
+
     # 1. Mean (Global Shift)
     mean = latents.mean(dim=[1, 2, 3], keepdim=True).squeeze(-1).squeeze(-1)
-    
+
     # 2. Std (Global Contrast/Variance - critical for diffusion)
     std = latents.std(dim=[1, 2, 3], keepdim=True).squeeze(-1).squeeze(-1)
-    
+
     # 3. Robust Max (95th Percentile) - Stable measurement of dynamic range
     # We flatten the spatial dims to compute quantile
     b, c, h, w = latents.shape
@@ -19,7 +19,7 @@ def extract_latent_stats(latents):
     # kthvalue is faster than quantile for tensors
     k = int(0.95 * flat.shape[1])
     p95 = torch.kthvalue(flat, k, dim=1).values.unsqueeze(1)
-    
+
     # 4. Center Magnitude (L1 Norm centered)
     # This helps distinguish "Gaussian noise" from "Sparse Image Edges"
     l1_mag = (latents - mean.unsqueeze(-1).unsqueeze(-1)).abs().mean(dim=[1, 2, 3])
@@ -49,7 +49,20 @@ class DifferentiableDiffusionHandler:
         alpha_t = alpha_t ** 0.5
         return alpha_t, sigma_t
 
-    def step(self, latents, t_now, t_next, text_emb):
+    def step(self, latents, t_now, t_next, text_emb, guidance_scale = 7.5):
+        # Classifier-Free Guidance
+        # 1. Expand latents for CFG (Batch size * 2)
+        latents_input = torch.cat([latents] * 2)
+        t_input = torch.cat([t_now] * 2)
+
+        # 2. Predict Noise (Unconditional + Conditional)
+        # We assume text_emb has both [uncond, cond] stacked
+        noise_pred = self.unet(latents_input, t_input, encoder_hidden_states=text_emb).sample
+
+        # 3. Perform Guidance
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
         alpha_now, sigma_now = self.get_alpha_sigma(t_now)
         alpha_next, _ = self.get_alpha_sigma(t_next)
 

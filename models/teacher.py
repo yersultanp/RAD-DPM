@@ -1,33 +1,27 @@
 # models/teacher/teacher_loader.py
+import sys
+sys.path.append('/content/drive/MyDrive/Adversarial-Diffusion-Distillation')
 import torch
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, DDIMScheduler
+from configs.model_config import ModelConfig
 
-def load_teacher():
+def load_teacher_model(device):
     pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16
-    ).to("cuda")
+        ModelConfig.TEACHER_ID, 
+        torch_dtype=torch.float16 if "cuda" in device else torch.float16
+    )
+    pipe = pipe.to(device)
 
-    pipe.unet.eval()
-    pipe.vae.eval()
-    pipe.text_encoder.eval()
-
+    # 1. Freeze Weights (Parameters won't change)
     pipe.unet.requires_grad_(False)
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
-
-    return pipe.unet, pipe.vae, pipe.tokenizer, pipe.text_encoder
-
-def teacher_noise_pred(unet, x_t, t, cond):
-    with torch.no_grad():
-        return unet(
-            x_t,
-            t,
-            encoder_hidden_states=cond
-        ).sample
-
-def encode_image_to_latent(vae, image):
-    return vae.encode(image).latent_dist.sample
-
-def decode_latent_to_image(vae, lat):
-    return vae.decode(lat).sample
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    
+    # 2. Enable Checkpointing (Memory saving)
+    pipe.unet.enable_gradient_checkpointing()
+    
+    # 3. Set mode to train (Required for checkpointing to function actively)
+    pipe.unet.train() 
+    
+    return pipe

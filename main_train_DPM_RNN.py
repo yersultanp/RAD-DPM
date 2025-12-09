@@ -1,29 +1,49 @@
-# main_train.py
 import torch
 import sys
 import os
+import numpy as np
 from tqdm import tqdm
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 import random
-sys.path.append('/content/drive/MyDrive/Adversarial-Diffusion-Distillation')
+
+# Adjust path if necessary
+# sys.path.append('/content/drive/MyDrive/Adversarial-Diffusion-Distillation')
+
 from configs.model_config import ModelConfig
 from configs.train_config import TrainConfig
 from configs.scheduler_config import SchedulerConfig
 from models.teacher import load_teacher_model
 from models.student import RecurrentScheduler
-from ddim_utils import DifferentiableDPMSolverHandler
-from train.train_step import train_one_step, generate_teacher_target
-from losses import image_loss, HybridLatentLoss
+# Ensure this imports the NEW FP16-safe handler
+from ddim_utils import DifferentiableDPMSolverHandler 
+from train.train_step import generate_teacher_target
+from losses import HybridLatentLoss
 from models.refiner import attach_refiner_lora
-from eval.visualize_schedule import plot_scheduler_training_history
-from eval.plot_results import comparison_pipeline
+# Ensure you added plot_refiner_history to this file/import
+from eval.visualize_schedule import plot_scheduler_training_history, analyze_schedule_variance, plot_refiner_history
+from eval.plot_results import comparison_pipeline, visualize_sequence_comparison
 
-def main():
-    student = RecurrentScheduler(SchedulerConfig.K_STEPS).to(TrainConfig.DEVICE)
-    optimizer = torch.optim.AdamW(student.parameters(), lr=TrainConfig.LEARNING_RATE)
+def run_training_for_k(k_steps):
+    """
+    Runs the entire training pipeline for a specific K step count.
+    Returns a dictionary of results.
+    """
+    # 1. Update Config
+    SchedulerConfig.K_STEPS = k_steps
+    print(f"\n{'='*40}")
+    print(f"STARTING TRAINING FOR K={k_steps}")
+    print(f"{'='*40}\n")
+
+    # 2. Re-Initialize Models (Fresh Start)
+    student = RecurrentScheduler(input_dim=4).to(TrainConfig.DEVICE)
+    # Lower LR slightly for K=8 stability
+    lr = 1e-4 if k_steps >= 8 else TrainConfig.LEARNING_RATE
+    optimizer = torch.optim.AdamW(student.parameters(), lr=lr)
+    
     pipe = load_teacher_model(TrainConfig.DEVICE)
-    pipe = attach_refiner_lora(pipe)
+    pipe = attach_refiner_lora(pipe) 
+    
     scaler = GradScaler()
     dpm_handler = DifferentiableDPMSolverHandler(pipe)
     loss_fn = HybridLatentLoss(alpha_mse=1.0, alpha_cos=0.1, alpha_stats=0.1).to(TrainConfig.DEVICE)
@@ -31,150 +51,145 @@ def main():
     loss_history = []
     schedule_history = []
 
-    print("Starting Training...")
-    pbar = tqdm(range(TrainConfig.EPOCHS))
-
+    # 3. Data Setup (SFW / Texture Prompts)
     TRAIN_PROMPTS = [
-    # --- Nature & Wildlife (Texture & High Frequency) ---
-    "A macro photograph of dew drops on a spiderweb in the morning light",
-    "A candid portrait of a grizzly bear catching a salmon in a river",
-    "A majestic herd of wild horses galloping across a dusty plain",
-    "A vibrant coral reef teeming with colorful tropical fish, underwater photography",
-    "A close-up of a chameleon's eye, showing its intricate texture and color",
-    "A lone wolf howling at a full moon on a snowy ridge",
-    "A detailed photograph of a monarch butterfly resting on a purple lavender stalk",
-    "A macro photograph of a bumblebee on a yellow flower",
-    "A close-up portrait of a snowy owl with detailed feathers",
-    "A cute corgi running through a field of tall green grass",
+    # --- Animals (Fur/Feathers - High Texture) ---
+    "A fluffy red panda sleeping on a tree branch, 4k resolution",
+    "A majestic lion with a thick mane standing in the savannah",
+    "A macro photo of a peacock feather showing iridescent colors",
+    "A close-up of a blue dragonfly resting on a green leaf",
+    "A baby penguin standing on an iceberg in Antarctica",
+    "A koala hugging a eucalyptus tree, detailed fur texture",
+    "A vibrant green frog sitting on a lotus leaf",
+    "A large elephant walking through dust at sunset",
+    
+    # --- Landscapes & Nature (Lighting/Depth) ---
+    "A dense bamboo forest with sunlight filtering through the stalks",
+    "A serene alpine lake reflecting snow-capped mountains",
+    "A desert canyon with red rock formations under a blue sky",
+    "A field of sunflowers facing the sun, bright and colorful",
+    "A Northern Lights aurora borealis over a winter forest",
+    "A tropical island beach with palm trees and turquoise water",
+    "A misty morning in a pine forest, atmospheric lighting",
+    "A volcanic eruption with flowing lava and smoke",
 
-    # --- Landscapes (Depth & Lighting) ---
-    "A dramatic coastal cliffside with crashing waves at sunset",
-    "A winding path through an autumn forest with colorful falling leaves",
-    "A panoramic view of a snow-capped mountain range under a clear blue sky",
-    "A secluded tropical beach with turquoise water and palm trees",
-    "A rolling vineyard in Tuscany bathed in golden hour light",
-    "A frozen waterfall with large icicles hanging from a rock face",
-    "A vast lavender field in Provence, stretching as far as the eye can see",
-    "A serene misty mountain lake at sunrise, landscape photography",
-    "A dusty desert road stretching into the horizon",
+    # --- Architecture & Sci-Fi (Geometry/Lines) ---
+    "A futuristic space station orbiting a blue planet",
+    "A steampunk clock tower with brass gears and steam",
+    "A cybernetic robot hand holding a glowing blue orb",
+    "A medieval stone castle on a hill, cloudy sky",
+    "A modern glass bridge connecting two skyscrapers",
+    "A cozy wooden cabin interior with a fireplace and rug",
+    "A high-speed train traveling through a futuristic tunnel",
+    "An isometric view of a low-poly magical island",
 
-    # --- Urban & Architecture (Geometry & Structure) ---
-    "A busy Tokyo street crossing at night, filled with pedestrians and neon signs",
-    "A futuristic monorail passing through a glass tunnel in a metropolis",
-    "An old, ivy-covered stone bridge crossing a quiet canal in Bruges",
-    "A modern skyscraper with a vertical garden growing on its facade",
-    "A bustling open-air market in Marrakech, filled with spices and textiles",
-    "A retro-futuristic diner with flying cars parked outside",
-    "An ancient temple hidden deep within a jungle, overgrown with vines",
-    "A futuristic cyberpunk city at night with neon rain",
+    # --- Objects & Still Life (Material Properties) ---
+    "A crystal chess set arranged on a glass table",
+    "A vintage brass compass lying on an old map",
+    "A basket of fresh red apples and green grapes",
+    "A detailed macro shot of a mechanical watch movement",
+    "A pile of gold coins and jewels in a treasure chest",
+    "A ceramic teapot with floral patterns, studio lighting"
+    ]     
 
-    # --- Objects & Food (Material & Reflection) ---
-    "A rustic loaf of sourdough bread on a wooden cutting board with butter and a knife",
-    "A steaming bowl of ramen with pork, egg, and nori, close-up shot",
-    "A stack of fluffy pancakes topped with fresh berries and maple syrup",
-    "A vintage film camera and a stack of old photographs on a desk",
-    "A colorful arrangement of fresh fruits and vegetables at a farmer's market stand",
-    "A detailed shot of a gourmet chocolate dessert with gold leaf garnish",
-    "An antique brass telescope sitting by a window with a sea view",
-    "A shiny red sports car driving on a coastal highway"
-    ]
-
+    print("Generating Teacher Targets...")
     train_data = generate_teacher_target(pipe, TRAIN_PROMPTS, TrainConfig.DEVICE)
 
     null_inputs = pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).to(TrainConfig.DEVICE)
     with torch.no_grad():
         null_emb = pipe.text_encoder(null_inputs.input_ids)[0]
 
-
     # ==========================================
     # PHASE 1: TRAIN SCHEDULER
     # ==========================================
-
-    print("\n=== Phase 1: Training Scheduler ===")
-    pipe.unet.disable_adapter_layers() # Disable LoRA
+    print(f"\n[K={k_steps}] Phase 1: Training Scheduler...")
+    pipe.unet.disable_adapter_layers() 
+    
+    pbar = tqdm(range(TrainConfig.EPOCHS))
     for epoch in pbar:
         epoch_loss = 0
-        current_schedule = []
+        current_schedule_snapshot = [] 
 
         for i, data in enumerate(train_data):
-            learned_schedule = []
             text_emb = data["emb"]
-            student_latents = data["noise"].clone().requires_grad_(True)
+            latents = data["noise"].clone().requires_grad_(True)
             target_latents = data["target"]
-            # Initialize History as None
-            prev_noise = None
-            prev_lambda = None
-
-            # 1. Initial State
-            # Start at t=1000 (Pure Noise)
+            
+            # RNN State Init
             t_curr = torch.full((TrainConfig.BATCH_SIZE, 1), 1000.0, device=TrainConfig.DEVICE)
-            hx = None # Hidden state starts empty
+            hx = None
+            prev_noise = None
+            prev_h = None 
+            
+            sample_schedule = [1000.0]
 
             optimizer.zero_grad()
 
             with autocast():
-                # 1. Run Student Loop
-                for k in range(SchedulerConfig.K_STEPS):
-                    learned_schedule.append(t_curr.item())
-
-                    if k < SchedulerConfig.K_STEPS - 1:
-                        t_next, hx = student(student_latents, t_curr, hx)
-                        t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
+                for k in range(k_steps):
+                    # Unpack RNN
+                    t_next, hx = student(latents, t_curr, hx)
+                    
+                    if k < k_steps - 1:
+                        # Adaptive constraint
+                        min_step = 10.0 if k_steps >= 8 else 50.0
+                        max_allowed = t_curr - 10.0
+                        t_next = torch.min(t_next, max_allowed).clamp(min=min_step)
                     else:
                         t_next = torch.zeros_like(t_curr)
 
-                    # Step returns: New Latents, Current Noise, Current Lambda
-                    student_latents, curr_noise, curr_lambda = dpm_handler.step(
-                        student_latents, t_curr, t_next, text_emb,
-                        prev_noise_pred=prev_noise, # Pass history
-                        prev_lambda=prev_lambda,    # Pass history
+                    # Log schedule
+                    if i == 0: sample_schedule.append(t_next.item())
+
+                    # DPM Step (FP16-Native Handler)
+                    latents, curr_noise, curr_h = dpm_handler.step(
+                        latents, t_curr, t_next, text_emb,
+                        prev_noise_pred=prev_noise, prev_h=prev_h, 
                         guidance_scale=1.0
                     )
 
-                    # Update History
                     prev_noise = curr_noise
-                    prev_lambda = curr_lambda
+                    prev_h = curr_h
                     t_curr = t_next
 
-                # 2. Compute Loss (in fp16/fp32 automatically handled)
-                loss = loss_fn(student_latents, target_latents)
+                loss = loss_fn(latents, target_latents)
+            
+            # NaN Guard
+            if torch.isnan(loss):
+                print(f"⚠️ Warning: NaN Loss at Epoch {epoch}. Skipping.")
+                optimizer.zero_grad()
+                continue 
 
-            # 3. Backprop with Scaler
             scaler.scale(loss).backward()
-
-            # Unscale grads to clip them
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 0.5)
             scaler.step(optimizer)
             scaler.update()
 
             epoch_loss += loss.item()
-            current_schedule.append(learned_schedule)
+            if i == 0: current_schedule_snapshot.append(sample_schedule)
 
         avg_loss = epoch_loss / len(train_data)
         loss_history.append(avg_loss)
-        schedule_history.append(current_schedule)
-        pbar.set_description(f"Scheduler Loss: {avg_loss:.4f}")
-
-    print("Scheduler Training Complete!")
+        if current_schedule_snapshot:
+            schedule_history.append(current_schedule_snapshot[0]) 
+        
+        pbar.set_description(f"Loss: {avg_loss:.4f}")
 
     # ==========================================
-    # PHASE 2: TRAINING REFINER (LoRA)
+    # PHASE 2: TRAIN REFINER (LoRA)
     # ==========================================
-
-    print("\n=== Phase 2: Training Refiner (LoRA) ===")
-    pipe.unet.enable_adapter_layers() # Enable LoRA
-    pbar = tqdm(range(TrainConfig.EPOCHS))
-
-
+    print(f"\n[K={k_steps}] Phase 2: Training Refiner (LoRA)...")
+    pipe.unet.enable_adapter_layers()
+    
     refiner_params = [p for p in pipe.unet.parameters() if p.requires_grad]
     refiner_optimizer = torch.optim.AdamW(refiner_params, lr=1e-4)
+    student.requires_grad_(False) 
 
-    # Freeze the Student Scheduler now
-    student.requires_grad_(False)
-
-    REFINER_EPOCHS = 20 # Increased slightly as LoRA needs a bit more time
+    REFINER_EPOCHS = 15 
+    
+    # === NEW: Refiner History Container ===
+    refiner_loss_history = [] 
 
     for epoch in range(REFINER_EPOCHS):
         epoch_loss = 0
@@ -182,54 +197,43 @@ def main():
 
         for data in pbar_ref:
             text_emb = data["emb"]
-            # Start from noise
             latents = data["noise"].clone()
             target_latents = data["target"]
-            prev_noise = None
-            prev_lambda = None
+            
             t_curr = torch.full((TrainConfig.BATCH_SIZE, 1), 1000.0, device=TrainConfig.DEVICE)
-            hx = None # Hidden state starts empty
+            hx = None; prev_noise = None; prev_h = None
 
             refiner_optimizer.zero_grad()
 
             with autocast():
-                # A. Run Scheduler to get "Blurry Input" (No Grad on Scheduler)
-                # We purposefully disable LoRA for the first K-1 steps to simulate
-                # the "coarse" generation.
+                # A. Run Scheduler (LoRA OFF)
                 pipe.unet.disable_adapter_layers()
-
+                
                 with torch.no_grad():
-                    for k in range(SchedulerConfig.K_STEPS - 1): # Run all but last
+                    for k in range(k_steps - 1):
                         t_next, hx = student(latents, t_curr, hx)
-                        # Clamp logic
-                        t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
-                        # Step returns: New Latents, Current Noise, Current Lambda
-                        latents, curr_noise, curr_lambda = dpm_handler.step(
+                        max_allowed = t_curr - 10.0
+                        t_next = torch.min(t_next, max_allowed).clamp(min=10.0)
+
+                        latents, curr_noise, curr_h = dpm_handler.step(
                             latents, t_curr, t_next, text_emb,
-                            prev_noise_pred=prev_noise, # Pass history
-                            prev_lambda=prev_lambda,    # Pass history
+                            prev_noise_pred=prev_noise, prev_h=prev_h,
                             guidance_scale=1.0
                         )
+                        prev_noise = curr_noise
+                        prev_h = curr_h
+                        t_curr = t_next
 
-                # B. The Final Step (Refinement)
-                # Now we ENABLE LoRA. This is the only step we train.
+                # B. Final Step (LoRA ON)
                 pipe.unet.enable_adapter_layers()
-
-                # Get the final timestep (usually jump to 0)
-                t_curr, hx = student(latents, t_curr, hx)
                 t_next = torch.zeros_like(t_curr)
 
-                # FIX: Blind Training. Use null_emb instead of text_emb.
-                # This forces LoRA to look at pixels, avoiding prompt overfitting.
-                # We use the diff_handler to execute the step WITH gradients.
-                refined_latents, curr_noise, curr_lambda = dpm_handler.step(
-                    latents, t_curr, t_next, null_emb,
-                    prev_noise_pred=prev_noise, # Pass history
-                    prev_lambda=prev_lambda,    # Pass history
+                refined_latents, _, _ = dpm_handler.step(
+                    latents, t_curr, t_next, null_emb, 
+                    prev_noise_pred=prev_noise, prev_h=prev_h,
                     guidance_scale=1.0
                 )
 
-                # Compute loss
                 loss = loss_fn(refined_latents, target_latents)
 
             scaler.scale(loss).backward()
@@ -240,63 +244,110 @@ def main():
 
             epoch_loss += loss.item()
             pbar_ref.set_description(f"Loss: {loss.item():.4f}")
+        
+        # === NEW: Log Refiner Loss ===
+        avg_ref_loss = epoch_loss / len(train_data)
+        refiner_loss_history.append(avg_ref_loss)
 
-        avg_loss = epoch_loss / len(train_data)
-        print(f"Refiner Epoch {epoch+1} Avg Loss: {avg_loss:.4f}")
-
-    print("Refiner Training Complete!")
     # ==========================================
-    # EVALUATION
+    # EVALUATION & SAVING
     # ==========================================
-    # Visualize Scheduling Results
-    if not os.path.exists(f"./final_results_{SchedulerConfig.K_STEPS}_STEPS"):
-        os.makedirs(f"./final_results_{SchedulerConfig.K_STEPS}_STEPS")
+    save_dir = f"./final_results_K{k_steps}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    # we can sample a few data points to visualize
-    # current schedule_history is a list of lists of lists (n epochs x n_data x K_STEPS)
-    k = 1
-    k_idx = random.sample([i for i in range(len(TRAIN_PROMPTS))], k)
-    for i in k_idx:
-        schedule_history_sample = [epoch_schedule[i] for epoch_schedule in schedule_history]
-        plot_scheduler_training_history(loss_history, schedule_history_sample, i, save_dir=f"./final_results_{SchedulerConfig.K_STEPS}_STEPS")
+    torch.save(student.state_dict(), os.path.join(save_dir, "student_scheduler.pth"))
+    
+    print(f"Plotting Training History for K={k_steps}...")
+    idx = 0
+    plot_scheduler_training_history(loss_history, schedule_history, idx, save_dir=save_dir)
+    
+    # === NEW: Plot Refiner History ===
+    plot_refiner_history(refiner_loss_history, save_dir=save_dir)
 
+    # Eval Prompts
     EVAL_PROMPTS = [
-    # --- Category 1: Texture Stress Test (High Frequency) ---
-    # Tests if the scheduler skips the critical end-steps (t < 100) needed for fine detail.
-    "A close-up texture shot of a knitted wool sweater, high detail",
-    "A macro shot of moss growing on a wet rock, detailed greenery",
-    "A weathered wooden plank with peeling blue paint and rust",
+    # --- Texture Stress Test (Fine Detail) ---
+    "A close-up of a woven wicker basket, high detail",
+    "A macro shot of snowflakes on a dark wool mitten",
+    "A detailed painting of a dragon scale texture",
+    
+    # --- Contrast & Lighting Test (Dynamic Range) ---
+    "A lighthouse beam cutting through a dark stormy night",
+    "A neon sign reflecting in a rainy street puddle",
+    "A bright solar eclipse with the diamond ring effect",
 
-    # --- Category 2: Lighting & Dynamic Range (Contrast) ---
-    # Tests if the scheduler can resolve values early. Bad schedules make these gray/washed out.
-    "A bioluminescent mushroom forest glowing in the dark",
-    "A lighthouse beam cutting through thick fog at night",
-    "A dramatic candlelight portrait of a woman, chiaroscuro style",
+    # --- Geometry Stress Test (Straight Lines) ---
+    "A blueprint of a complex engine on blue paper",
+    "A perfectly symmetrical kaleidoscope pattern",
+    "A wireframe 3D model of a sports car, neon lines",
 
-    # --- Category 3: Geometry & Structure (Low Frequency / Edges) ---
-    # Tests if the scheduler commits to shapes early (t > 500).
-    # Bad schedules make these lines wobbly or disconnected.
-    "A perfectly folded origami crane sitting on a black table",
-    "A complex circuit board with gold traces and chips",
-    "A spiral staircase looking down from the top, fibonacci composition",
-
-    # --- Category 4: Compositional Complexity (Object Separation) ---
-    # Tests if the scheduler can separate distinct concepts without blending them.
-    "A game of chess in progress, focus on the black king",
-    "A vintage tea set arranged on a checkered picnic blanket",
-    "A stack of balanced zen stones on a riverbank",
-
-    # --- Category 5: Stylistic & Distribution Shift ---
-    # Tests if the scheduler generalizes to non-photorealistic noise distributions.
-    "A colorful stained glass window depicting a dragon",
-    "A black and white ink sketch of a mountain range, minimalism",
-    "A pixel art landscape of a sunset over a desert",
+    # --- Composition Test (Object Separation) ---
+    "A red apple, a yellow banana, and a green pear in a row",
+    "A stack of colorful hardcover books on a wooden shelf",
+    "A collection of different seashells on sand"
     ]
-    mean_schedule = analyze_schedule_variance(student, TRAIN_PROMPTS + EVAL_PROMPTS)
-    print(f"Optimal Hardcoded Schedule: {mean_schedule}")
-    # Compare Methods Pipeline
-    comparison_pipeline(pipe, dpm_handler, student, EVAL_PROMPTS, K_STEPS=SchedulerConfig.K_STEPS, 
-                        DEVICE=TrainConfig.DEVICE, save_dir=f"./final_results_{SchedulerConfig.K_STEPS}_STEPS/full_comparison_grid.png")
+
+    mean_schedule = analyze_schedule_variance(
+        student, EVAL_PROMPTS, k_steps, 
+        device=TrainConfig.DEVICE, save_dir=save_dir
+    )
+    
+    pipe.unet.enable_adapter_layers()
+    
+    scores = comparison_pipeline(
+        pipe, dpm_handler, student, 
+        EVAL_PROMPTS, 
+        K_STEPS=k_steps, 
+        DEVICE=TrainConfig.DEVICE, 
+        save_dir=os.path.join(save_dir, "comparison_grid.png")
+    )
+    
+    visualize_sequence_comparison(
+        pipe, dpm_handler, student, 
+        prompt="A close-up of a woven wicker basket, high detail", 
+        K_STEPS=k_steps, 
+        DEVICE=TrainConfig.DEVICE, 
+        save_path=os.path.join(save_dir, "denoising_sequence.png")
+    )
+
+    return {
+        "K": k_steps,
+        "Scores": scores, 
+        "Mean Schedule": [int(t) for t in mean_schedule]
+    }
 
 if __name__ == "__main__":
-    main()
+    k_values = [2, 4, 8] # Run specific experiment
+    final_results = []
+
+    try:
+        for k in k_values:
+            result = run_training_for_k(k)
+            final_results.append(result)
+            torch.cuda.empty_cache()
+            
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user.")
+
+    print("\n" + "="*60)
+    print("FINAL EXPERIMENT REPORT")
+    print("="*60)
+    
+    print(f"{'K Steps':<10} | {'Baseline':<15} | {'Sched':<15} | {'Sched + LoRA':<15}")
+    print("-" * 60)
+    
+    for res in final_results:
+        k = res['K']
+        s_base = res['Scores'].get('Simple DPM', 0.0)
+        s_sched = res['Scores'].get('Scheduled', 0.0)
+        s_lora = res['Scores'].get('Scheduled + LoRA', 0.0)
+        
+        print(f"{k:<10} | {s_base:.4f}          | {s_sched:.4f}          | {s_lora:.4f}")
+
+    print("\n" + "="*60)
+    print("LEARNED SCHEDULES")
+    print("="*60)
+    for res in final_results:
+        print(f"K={res['K']}: {res['Mean Schedule']}")
+    print("="*60)

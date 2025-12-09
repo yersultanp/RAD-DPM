@@ -5,6 +5,7 @@ from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, DDIM
 from diffusers.utils.torch_utils import randn_tensor
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torch.cuda.amp import autocast
+import os
 
 # Initialize Metric
 lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to("cuda")
@@ -73,7 +74,6 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
             if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
             pipe.scheduler = DPMSolverMultistepScheduler.from_config(
             pipe.scheduler.config,
-            use_karras_sigmas=False
             )
             pipe.scheduler.set_timesteps(K_STEPS)
             natural_steps = pipe.scheduler.timesteps.tolist() + [0]
@@ -90,21 +90,26 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
             
             latents = init_latents.clone()
             t_curr = torch.full((1, 1), 1000.0, device=DEVICE)
-            hx = None; prev_noise = None; prev_lambda = None
+            hx = None; prev_noise = None; prev_h = None
             learned_steps = [t_curr.item()]
             
             for k in range(K_STEPS):
                 t_next, hx = student(latents, t_curr, hx)
-                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
+                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 10.0).clamp(min=10)
                 else: t_next = torch.zeros_like(t_curr)
                 
+
                 learned_steps.append(t_next.item())
 
-                latents, prev_noise, prev_lambda = dpm_handler.step(
+                # DPM Step (FP16-Native Handler)
+                latents, curr_noise, curr_h = dpm_handler.step(
                     latents, t_curr, t_next, cfg_text_emb,
-                    prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=5.0
+                    prev_noise_pred=prev_noise, prev_h=prev_h, 
+                    guidance_scale=4.0
                 )
+
+                prev_noise = curr_noise
+                prev_h = curr_h
                 t_curr = t_next
             
             results["Scheduled"].append(decode_latents(pipe, latents))
@@ -116,7 +121,7 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
             # Reset state for a clean run
             latents = init_latents.clone()
             t_curr = torch.full((1, 1), 1000.0, device=DEVICE)
-            hx = None; prev_noise = None; prev_lambda = None
+            hx = None; prev_noise = None; prev_h = None
             # Schedule might change slightly because LoRA changes latents at the last step
             learned_steps_lora = [t_curr.item()] 
             LORA_SCALE = 0.6
@@ -135,16 +140,20 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
                     if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
 
                 t_next, hx = student(latents, t_curr, hx)
-                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
+                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 10).clamp(min=10)
                 else: t_next = torch.zeros_like(t_curr)
                 
                 learned_steps_lora.append(t_next.item())
 
-                latents, prev_noise, prev_lambda = dpm_handler.step(
+                # DPM Step (FP16-Native Handler)
+                latents, curr_noise, curr_h = dpm_handler.step(
                     latents, t_curr, t_next, cfg_text_emb,
-                    prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=guidance
+                    prev_noise_pred=prev_noise, prev_h=prev_h, 
+                    guidance_scale=4.0
                 )
+
+                prev_noise = curr_noise
+                prev_h = curr_h
                 t_curr = t_next
             
             results["Scheduled + LoRA"].append(decode_latents(pipe, latents))
@@ -181,5 +190,142 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
     plt.savefig(save_dir)
     plt.show()
     plt.close()
+    return scores
 
+def visualize_sequence_comparison(pipe, dpm_handler, student, prompt, K_STEPS, DEVICE="cuda", save_path="./final_results/"):
+    """
+    Visualizes the step-by-step denoising process for Baseline vs. Student.
+    Shows the image state at every hop.
+    """
+    print(f"Generating Sequence Visualization for: '{prompt}'")
+    
+    # Setup
+    SEED = 999 # Fixed seed for sequence comparison
+    generator = torch.Generator(device=DEVICE).manual_seed(SEED)
+    
+    # Prepare Embeddings
+    null_emb = pipe.text_encoder(
+        pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).input_ids.to(DEVICE)
+    )[0]
+    text_input = pipe.tokenizer(prompt, return_tensors="pt", padding="max_length", truncation=True).to(DEVICE)
+    text_emb = pipe.text_encoder(text_input.input_ids)[0]
+    cfg_text_emb = torch.cat([null_emb, text_emb])
+    
+    # Initial Noise
+    init_latents = randn_tensor((1, 4, 64, 64), device=DEVICE, generator=generator, dtype=text_emb.dtype)
+
+    # Storage for (Image, Timestep Label)
+    history_baseline = []
+    history_student = []
+
+    def decode(l):
+        l = 1 / 0.18215 * l
+        img = pipe.vae.decode(l).sample
+        img = (img / 2 + 0.5).clamp(0, 1)
+        return img.float().cpu().permute(0, 2, 3, 1).numpy()[0]
+
+    with torch.no_grad(), autocast():
+        # ==========================================
+        # 1. BASELINE SEQUENCE (Linear DPM++)
+        # ==========================================
+        if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+        
+        # Configure Scheduler
+        sched = DPMSolverMultistepScheduler.from_config(
+        pipe.scheduler.config
+        )
+        sched.set_timesteps(K_STEPS)
+        timesteps = sched.timesteps.tolist()
+        
+        latents = init_latents.clone()
+        
+        # Save Initial State (t=1000)
+        history_baseline.append((decode(latents), 1000))
+        
+        # Run Baseline Loop manually to capture intermediates
+        for i, t in enumerate(timesteps):
+            # Standard Diffusers Pipe logic requires expanding latents for CFG if using it,
+            # but usually pipe() handles loop. We simulate step here using DPM Handler for fairness
+            # OR use the scheduler.step() directly. Let's use dpm_handler with fixed steps to ensure visual parity.
+            
+            # Note: For strict baseline matching, we normally use sched.step, but to visualize 
+            # the integration difference, we use the handler with FIXED linear steps.
+            t_curr = torch.tensor([t], device=DEVICE)
+            t_next = torch.tensor([timesteps[i+1] if i < len(timesteps)-1 else 0], device=DEVICE)
+            
+            # We treat baseline as having no history for visualization simplicity 
+            # (or you can manage prev_noise if you want perfect DPM match)
+            # Here we assume First Order for visualization speed/simplicity
+            latents, _, _ = dpm_handler.step(latents, t_curr, t_next, cfg_text_emb, guidance_scale=4.0)
+            
+            history_baseline.append((decode(latents), int(t_next.item())))
+
+        # ==========================================
+        # 2. STUDENT SEQUENCE (Learned)
+        # ==========================================
+        latents = init_latents.clone()
+        t_curr = torch.full((1, 1), 1000.0, device=DEVICE)
+        hx = None; prev_noise = None; prev_h = None
+        
+        # Save Initial
+        history_student.append((decode(latents), 1000))
+        
+        for k in range(K_STEPS):
+            # A. Toggle LoRA
+            if k == K_STEPS - 1:
+                if hasattr(pipe.unet, "enable_adapter_layers"): pipe.unet.enable_adapter_layers()
+            else:
+                if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+
+            # B. Predict Step
+            t_next, hx = student(latents, t_curr, hx)
+            if k < K_STEPS - 1:
+                t_next = torch.min(t_next, t_curr - 10.0).clamp(min=10.0)
+            else:
+                t_next = torch.zeros_like(t_curr)
+            
+            # C. Integrate
+            # DPM Step (FP16-Native Handler)
+            latents, curr_noise, curr_h = dpm_handler.step(
+                latents, t_curr, t_next, cfg_text_emb,
+                prev_noise_pred=prev_noise, prev_h=prev_h, 
+                guidance_scale=4.0
+            )
+
+            prev_noise = curr_noise
+            prev_h = curr_h
+            
+            history_student.append((decode(latents), int(t_next.item())))
+            t_curr = t_next
+
+    # ==========================================
+    # 3. PLOTTING
+    # ==========================================
+    # Grid: 2 Rows x (K+1) Columns
+    n_cols = K_STEPS + 1
+    fig, axs = plt.subplots(2, n_cols, figsize=(3 * n_cols, 6))
+    
+    # Row 1: Baseline
+    axs[0, 0].set_ylabel("Baseline (DPM)", fontsize=14, fontweight='bold')
+    for i in range(n_cols):
+        img, t_val = history_baseline[i]
+        axs[0, i].imshow(img)
+        axs[0, i].set_title(f"t = {t_val}", fontsize=12)
+        axs[0, i].set_xticks([])
+        axs[0, i].set_yticks([])
+
+    # Row 2: Student
+    axs[1, 0].set_ylabel("Student (Learned)", fontsize=14, fontweight='bold')
+    for i in range(n_cols):
+        img, t_val = history_student[i]
+        axs[1, i].imshow(img)
+        # Highlight the non-linear jumps
+        axs[1, i].set_title(f"t = {t_val}", fontsize=12, color='blue' if i > 0 else 'black')
+        axs[1, i].set_xticks([])
+        axs[1, i].set_yticks([])
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Sequence saved to {save_path}")
 

@@ -115,27 +115,46 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 
-def analyze_schedule_variance(student, prompts, device="cuda", save_dir = "./final_results/schedule_variance_analysis.png"):
+import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+def analyze_schedule_variance(student, prompts, k_steps, device="cuda", save_dir="./final_results/"):
+    # 1. Setup
     student.eval()
     trajectories = []
     
+    # Ensure directory exists (Prevents FileNotFoundError)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
     print("Collecting trajectories...")
-    for p in prompts:
-        # Create random noise for this prompt
+    
+    # 2. Collection Loop
+    # Note: We don't actually use the text prompts here, we just use the list 
+    # to define 'how many' random noise samples to test. 
+    # This correctly tests "Latent-based variance".
+    for _ in range(len(prompts)):
+        # Create random noise 
         latents = torch.randn(1, 4, 64, 64).to(device)
         
-        # Run RNN
+        # Initialize State
         t_curr = torch.full((1, 1), 1000.0, device=device)
         hx = None
         path = [1000]
         
         with torch.no_grad():
-            for k in range(4): # K=4
+            for k in range(k_steps): 
+                # RNN Prediction
                 t_next, hx = student(latents, t_curr, hx)
-                if k < 3:
-                    # Apply your constraints
-                    t_next = torch.min(t_next, t_curr - 50.0).clamp(min=50.0)
+                
+                if k < k_steps - 1:
+                    # Apply constraints (Must match training logic!)
+                    max_allowed = t_curr - 10.0
+                    t_next = torch.min(t_next, max_allowed).clamp(min=20.0)
                 else:
+                    # Force 0 at the end
                     t_next = torch.zeros_like(t_curr)
                 
                 path.append(t_next.item())
@@ -143,28 +162,61 @@ def analyze_schedule_variance(student, prompts, device="cuda", save_dir = "./fin
         
         trajectories.append(path)
 
-    # Plotting
+    # 3. Plotting
     plt.figure(figsize=(10, 6))
     
-    # 1. Plot individual lines (High transparency)
+    # Plot individual lines (High transparency)
     trajectory_array = np.array(trajectories)
-    for i in range(len(trajectories)):
-        plt.plot(range(5), trajectory_array[i], color='blue', alpha=0.15)
-        
-    # 2. Plot the Mean Path
-    mean_path = np.mean(trajectory_array, axis=0)
-    plt.plot(range(5), mean_path, color='red', linewidth=3, marker='o', label="Mean Learned Schedule")
     
-    # 3. Plot Linear Baseline for comparison
-    plt.plot(range(5), [1000, 750, 500, 250, 0], 'k--', label="Linear Baseline")
+    # X-Axis is just 0, 1, 2... K
+    steps_x = range(k_steps + 1)
+    
+    for i in range(len(trajectories)):
+        plt.plot(steps_x, trajectory_array[i], color='blue', alpha=0.15)
+        
+    # Plot the Mean Path
+    mean_path = np.mean(trajectory_array, axis=0)
+    plt.plot(steps_x, mean_path, color='red', linewidth=3, marker='o', label="Mean Learned Schedule")
+    
+    # Plot Linear Baseline for comparison
+    plt.plot(steps_x, np.linspace(1000, 0, k_steps + 1), 'k--', label="Linear Baseline")
 
-    plt.title("Is the Schedule Adaptive or Universal?")
+    plt.title(f"Schedule Variance Analysis (K={k_steps})")
     plt.ylabel("Timestep (Noise Level)")
     plt.xlabel("Inference Step Index")
-    plt.xticks(range(5))
+    plt.xticks(steps_x)
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig(save_dir)
-    plt.show()
+    
+    # 4. Save and Show
+    save_path = os.path.join(save_dir, f"schedule_variance_analysis_k{k_steps}.png")
+    plt.savefig(save_path, dpi=150)
+    print(f"Schedule plots saved to {save_path}")
+    plt.close() # Good practice to close figure to free memory
     
     return mean_path
+
+# Append this to eval/visualize_schedule.py
+
+def plot_refiner_history(loss_history, save_dir="./results"):
+    """
+    Plots the training loss for the LoRA Refiner.
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    epochs = range(1, len(loss_history) + 1)
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, loss_history, 'r-', linewidth=2, label="Refiner (MSE) Loss")
+    
+    plt.title("Refiner (LoRA) Convergence", fontsize=14)
+    plt.xlabel("Epoch", fontsize=12)
+    plt.ylabel("Loss (MSE)", fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    save_path = os.path.join(save_dir, "refiner_training_loss.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Refiner plot saved to {save_path}")

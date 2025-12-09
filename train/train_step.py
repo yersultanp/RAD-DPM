@@ -38,8 +38,6 @@ def train_one_step(student, diff_handler, optimizer, pipe, train_data, K_STEPS, 
         target_latents = data["target"]
 
         optimizer.zero_grad()
-
-        # === The Magic Wrapper for Float16 ===
         with autocast():
             # 1. Run Student Loop
             for k in range(K_STEPS):

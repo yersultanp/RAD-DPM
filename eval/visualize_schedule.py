@@ -1,7 +1,9 @@
 import matplotlib.pyplot as plt
+import os
 import numpy as np
 import torch
 from torch.cuda.amp import autocast
+from configs.train_config import TrainConfig
 
 def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_history, schedule_history, K_STEPS, idx = 0):
 
@@ -52,3 +54,59 @@ def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_h
         plt.subplot(1, 2, 1); plt.imshow(img_teacher); plt.title("Teacher"); plt.axis("off")
         plt.subplot(1, 2, 2); plt.imshow(img_student); plt.title("Student"); plt.axis("off")
     plt.savefig(f"./results/target_compare_prompt_{idx}")
+
+def plot_scheduler_training_history(loss_history, schedule_history, save_dir="./results"):
+    """
+    Plots the training loss and the evolution of the learned timesteps.
+
+    Args:
+        loss_history (list): List of average loss per epoch.
+        schedule_history (list): List of lists, where each inner list contains
+                                 the [t_0, t_1, ..., t_k] values for that epoch.
+        save_dir (str): Directory to save the plot.
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    epochs = range(1, len(loss_history) + 1)
+
+    # Convert schedule history to numpy for easy slicing
+    # Shape: [Num_Epochs, K_STEPS]
+    schedule_array = np.array(schedule_history)
+    K_STEPS = schedule_array.shape[1]
+
+    plt.figure(figsize=(14, 6))
+
+    # --- Plot 1: Loss Curve ---
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, loss_history, 'b-', linewidth=2, label="Training Loss")
+    plt.title("Scheduler Loss Convergence", fontsize=14)
+    plt.xlabel("Epoch", fontsize=12)
+    plt.ylabel("Loss (Hybrid)", fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    # --- Plot 2: Schedule Evolution ---
+    plt.subplot(1, 2, 2)
+    colors = plt.cm.viridis(np.linspace(0, 1, K_STEPS))
+
+    for k in range(K_STEPS):
+        plt.plot(epochs, schedule_array[:, k],
+                 label=f"Step {k}",
+                 color=colors[k],
+                 linewidth=2)
+
+    plt.title("Evolution of Learned Timesteps", fontsize=14)
+    plt.xlabel("Epoch", fontsize=12)
+    plt.ylabel("Timestep Value (0-1000)", fontsize=12)
+    plt.ylim(-50, 1050) # Keep bounds visible
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='upper right')
+
+    plt.tight_layout()
+
+    # Save and Show
+    save_path = os.path.join(save_dir, "scheduler_training_progress.png")
+    plt.savefig(save_path, dpi=150)
+    print(f"Training plots saved to {save_path}")
+    plt.show()

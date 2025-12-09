@@ -16,7 +16,7 @@ def evaluation_pipeline(pipe, diff_handler, student, prompts, K_STEPS, DEVICE="c
 
     print("Generating Teacher (50 Steps) & Baseline (4 Steps)...")
 
-    # CRITICAL FIX 1: Ensure LoRA is DISABLED for Teacher and Baseline
+    # Ensure LoRA is DISABLED for Teacher and Baseline
     # We want the pure SD1.5 performance for comparison
     if hasattr(pipe.unet, "disable_adapter_layers"):
         pipe.unet.disable_adapter_layers()
@@ -71,8 +71,6 @@ def evaluation_pipeline(pipe, diff_handler, student, prompts, K_STEPS, DEVICE="c
 
                 # 2. Run the Student Loop
                 for k in range(K_STEPS):
-
-                    # CRITICAL FIX 2: "The Switch"
                     # Steps 0 to K-2: Coarse Generation (LoRA OFF)
                     # Step K-1 (Final): Refinement (LoRA ON)
                     if k == K_STEPS - 1:

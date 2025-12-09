@@ -25,6 +25,8 @@ def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_h
     print("Generating Final Comparison...")
     with torch.no_grad():
         with autocast():
+            null_inputs = pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).to(TrainConfig.DEVICE)
+            null_emb = pipe.text_encoder(null_inputs.input_ids)[0]
             data = train_data[idx]
             latents = data["noise"].clone()
             for k in range(K_STEPS):
@@ -34,7 +36,8 @@ def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_h
                     t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
                 else:
                     t_next = torch.zeros_like(t_curr)
-                latents = diff_handler.step(latents, t_curr, t_next, data["emb"])
+                cfg_text_emb = torch.cat([null_emb, data["emb"]])
+                latents = diff_handler.step(latents, t_curr, t_next, cfg_text_emb, guidance_scale = 7.5)
 
             # Decode (VAE expects fp16, handled by autocast)
             latents = 1 / 0.18215 * latents

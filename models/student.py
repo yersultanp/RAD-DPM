@@ -72,3 +72,67 @@ class RobustLearnedScheduler(nn.Module):
         # 3. CRITICAL: In a sequence, we enforce monotonicity in the training loop,
         #    but here we just ensure valid bounds.
         return t_pred.clamp(1.0, 1000.0)
+
+class RecurrentScheduler(nn.Module):
+    def __init__(self, input_dim=4, hidden_dim=64):
+        super().__init__()
+        
+        # 1. Feature Extractor
+        # Compresses latent stats (4) + prev_t (1) -> input features
+        self.encoder = nn.Linear(input_dim + 1, hidden_dim)
+        
+        # 2. The Recurrent Cell (The Brain)
+        # Keeps memory of the trajectory
+        self.rnn = nn.GRUCell(hidden_dim, hidden_dim)
+        
+        # 3. The Head (Predicts Step Size)
+        # We predict a value between 0 and 1, representing % of remaining time to jump
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.SiLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid() 
+        )
+        
+        self.hidden_dim = hidden_dim
+
+    def forward(self, latents, t_prev, hx=None):
+        """
+        Args:
+            latents: [Batch, 4, 64, 64] image state
+            t_prev:  [Batch, 1] previous timestep value
+            hx:      [Batch, hidden_dim] previous hidden state (memory)
+        """
+        batch_size = latents.shape[0]
+        
+        # 1. Initialize hidden state if None (Start of sequence)
+        if hx is None:
+            hx = torch.zeros(batch_size, self.hidden_dim, device=latents.device, dtype=latents.dtype)
+            
+        # 2. Extract Stats
+        # (Assuming you use the 4-stat extractor we discussed: Mean, Std, p95, L1)
+        stats = extract_latent_stats(latents) # [Batch, 4]
+        
+        # 3. Prepare Input
+        # Concatenate Stats with the Previous Timestep
+        # We normalize t_prev (0-1000) to (0-1) for stability
+        t_norm = t_prev / 1000.0
+        rnn_input = torch.cat([stats, t_norm], dim=1)
+        
+        # 4. RNN Step
+        x = torch.tanh(self.encoder(rnn_input))
+        hx_next = self.rnn(x, hx)
+        
+        # 5. Predict Jump Size (0.0 to 1.0)
+        # This represents "Percentage of current t to remove"
+        # e.g., output 0.5 at t=500 means jump to 250.
+        jump_percent = self.head(hx_next)
+        
+        # Calculate absolute delta
+        delta_t = jump_percent * t_prev
+        
+        # Calculate next t
+        t_next = t_prev - delta_t
+        
+        return t_next, hx_next
+

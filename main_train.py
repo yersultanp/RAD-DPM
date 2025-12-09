@@ -24,7 +24,7 @@ def main():
     optimizer = torch.optim.AdamW(student.parameters(), lr=TrainConfig.LEARNING_RATE)
     pipe = load_teacher_model(TrainConfig.DEVICE)
     pipe = attach_refiner_lora(pipe)
-    scaler = GradScaler() # Vital for float16 training stability
+    scaler = GradScaler()
     diff_handler = DifferentiableDiffusionHandler(pipe)
     loss_fn = HybridLatentLoss(alpha_mse=1.0, alpha_cos=0.1, alpha_stats=0.1).to(TrainConfig.DEVICE)
 
@@ -34,7 +34,6 @@ def main():
     print("Starting Training...")
     pbar = tqdm(range(TrainConfig.EPOCHS))
 
-    # 3. Dummy Data (Replace with datasets/dataset_loader.py in real version)
     TRAIN_PROMPTS = [
         "A macro photograph of a bumblebee on a yellow flower",
         "A close-up portrait of a snowy owl with detailed feathers",
@@ -64,7 +63,6 @@ def main():
         ]
     train_data = generate_teacher_target(pipe, TRAIN_PROMPTS, TrainConfig.DEVICE)
 
-    # FIX: Pre-compute Null Embedding for Blind LoRA Training
     null_inputs = pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).to(TrainConfig.DEVICE)
     with torch.no_grad():
         null_emb = pipe.text_encoder(null_inputs.input_ids)[0]
@@ -85,7 +83,6 @@ def main():
 
             optimizer.zero_grad()
 
-            # === The Magic Wrapper for Float16 ===
             with autocast():
                 # 1. Run Student Loop
                 for k in range(SchedulerConfig.K_STEPS):
@@ -130,7 +127,6 @@ def main():
     print("\n=== Phase 2: Training Refiner (LoRA) ===")
     pipe.unet.enable_adapter_layers() # Enable LoRA
 
-    # FIX: Correct way to get LoRA parameters
     refiner_params = [p for p in pipe.unet.parameters() if p.requires_grad]
     refiner_optimizer = torch.optim.AdamW(refiner_params, lr=1e-4)
 

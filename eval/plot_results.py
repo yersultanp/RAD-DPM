@@ -9,7 +9,7 @@ from torch.cuda.amp import autocast
 # Initialize Metric
 lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to("cuda")
 
-def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="cuda", save_dir = "./final_results/4_comparison_img.png"):
+def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="cuda", save_dir = "./final_results/comparison_img.png"):
     """
     Generates a 4-way comparison grid:
     1. Teacher (50 step DDIM)
@@ -71,9 +71,13 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
             # 2. Simple DPM (4 Natural Steps)
             # ============================================
             if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
-            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-            pipe.scheduler.config.algorithm_type = "dpmsolver++"
-            pipe.scheduler.config.use_karras_sigmas = True
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=False
+            )
+            pipe.scheduler.set_timesteps(K_STEPS)
+            natural_steps = pipe.scheduler.timesteps.tolist() + [0]
+            print(f"Simple DPM Schedule (for {K_STEPS} steps): {natural_steps}\n")
             
             g_pipe = torch.Generator(device=DEVICE).manual_seed(SEED + i)
             img = pipe(prompt, num_inference_steps=K_STEPS, generator=g_pipe, output_type="pt").images[0]
@@ -99,7 +103,7 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
                 latents, prev_noise, prev_lambda = dpm_handler.step(
                     latents, t_curr, t_next, cfg_text_emb,
                     prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=4.0
+                    guidance_scale=5.0
                 )
                 t_curr = t_next
             
@@ -115,12 +119,19 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
             hx = None; prev_noise = None; prev_lambda = None
             # Schedule might change slightly because LoRA changes latents at the last step
             learned_steps_lora = [t_curr.item()] 
-            
+            LORA_SCALE = 0.6
             for k in range(K_STEPS):
                 # Toggle LoRA: ON only for the final step
                 if k == K_STEPS - 1:
-                    if hasattr(pipe.unet, "enable_adapter_layers"): pipe.unet.enable_adapter_layers()
+                    guidance = 1.5
+                    if hasattr(pipe.unet, "enable_adapter_layers"): 
+                        pipe.unet.enable_adapter_layers()
+                        try:
+                            pipe.unet.set_adapter("default", adapter_weights=[LORA_SCALE])
+                        except:
+                            pass # Fallback if set_adapter not supported
                 else:
+                    guidance = 4.0
                     if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
 
                 t_next, hx = student(latents, t_curr, hx)
@@ -132,7 +143,7 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
                 latents, prev_noise, prev_lambda = dpm_handler.step(
                     latents, t_curr, t_next, cfg_text_emb,
                     prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=4.0
+                    guidance_scale=guidance
                 )
                 t_curr = t_next
             
@@ -162,12 +173,13 @@ def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="
 
     for i in range(n_prompts):
         for j, method in enumerate(cols):
-            img = results[method][i].cpu().permute(1, 2, 0).numpy()
+            img = results[method][i].float().cpu().permute(1, 2, 0).numpy().astype(np.float32)
             axs[i, j].imshow(img)
             axs[i, j].axis("off")
             
     plt.tight_layout()
     plt.savefig(save_dir)
     plt.show()
+    plt.close()
 
 

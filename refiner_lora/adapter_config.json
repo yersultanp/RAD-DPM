@@ -32,10 +32,10 @@
   "rank_pattern": {},
   "revision": null,
   "target_modules": [
-    "to_k",
-    "to_v",
     "to_q",
-    "to_out.0"
+    "to_out.0",
+    "to_k",
+    "to_v"
   ],
   "target_parameters": null,
   "task_type": null,

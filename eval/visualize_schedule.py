@@ -55,7 +55,7 @@ def visualize_scheduling_results(student, diff_handler, pipe, train_data, loss_h
         plt.subplot(1, 2, 2); plt.imshow(img_student); plt.title("Student"); plt.axis("off")
     plt.savefig(f"./results/target_compare_prompt_{idx}")
 
-def plot_scheduler_training_history(loss_history, schedule_history, save_dir="./results"):
+def plot_scheduler_training_history(loss_history, schedule_history, save_dir="./results/"):
     """
     Plots the training loss and the evolution of the learned timesteps.
 

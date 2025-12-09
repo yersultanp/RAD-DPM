@@ -32,8 +32,8 @@
   "rank_pattern": {},
   "revision": null,
   "target_modules": [
-    "to_v",
     "to_k",
+    "to_v",
     "to_q",
     "to_out.0"
   ],

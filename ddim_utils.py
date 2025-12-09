@@ -104,11 +104,7 @@ class DifferentiableDPMSolverHandler:
         self.alphas_cumprod = pipe.scheduler.alphas_cumprod.to(pipe.device)
 
     def get_lambda(self, t):
-        """
-        Computes Log-SNR (Lambda) differentiably.
-        Lambda = log(alpha / sigma)
-        """
-        # 1. Get Alpha/Sigma (using Log-Linear Interpolation for stability)
+        # 1. Get Alpha/Sigma (Log-Linear Interpolation)
         t = t.squeeze()
         low_idx = t.floor().long().clamp(0, len(self.alphas_cumprod)-2)
         high_idx = low_idx + 1
@@ -117,16 +113,14 @@ class DifferentiableDPMSolverHandler:
         alpha_low = self.alphas_cumprod[low_idx]
         alpha_high = self.alphas_cumprod[high_idx]
         
-        # Log-Linear Interpolation
         log_alpha_t = (1 - w) * torch.log(alpha_low) + w * torch.log(alpha_high)
         alpha_t = torch.exp(log_alpha_t)
 
-        # Reshape
         alpha_t = alpha_t.view(-1, 1, 1, 1)
+        # Note: diffusers definition of sigma is usually sqrt(1 - alpha_cumprod)
         sigma_t = (1 - alpha_t) ** 0.5
         alpha_t = alpha_t ** 0.5 
         
-        # 2. Compute Lambda
         # lambda = log(alpha/sigma)
         lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
         
@@ -135,9 +129,8 @@ class DifferentiableDPMSolverHandler:
     def step(self, latents, t_now, t_next, text_emb, 
              prev_noise_pred=None, prev_lambda=None, guidance_scale=1.0):
         
-        # --- 1. PREDICT NOISE (With Optional CFG) ---
+        # --- 1. PREDICT NOISE ---
         do_cfg = guidance_scale > 1.0
-        
         if do_cfg:
             latents_input = torch.cat([latents] * 2)
             t_input = torch.cat([t_now] * 2).view(-1)
@@ -148,55 +141,36 @@ class DifferentiableDPMSolverHandler:
             t_input = t_now.view(-1)
             noise_pred = self.unet(latents, t_input, encoder_hidden_states=text_emb).sample
 
-        # --- 2. DPM-SOLVER++ MATH ---
-        
-        # Get Parameters for current and next step
+        # --- 2. GET STATS ---
         lambda_now, alpha_now, sigma_now = self.get_lambda(t_now)
         lambda_next, alpha_next, sigma_next = self.get_lambda(t_next)
         
-        # h = step size in log-SNR space
+        # h = step size
         h = lambda_next - lambda_now
-        
-        # Phi_1 (Exponential Integrator factor)
-        # x_t = (sigma_t / sigma_s) * x_s - alpha_t * (exp(-h) - 1) * noise
-        phi_1 = torch.expm1(-h) # exp(-h) - 1
 
-        # A. First Order Update (Standard DPM/DDIM)
-        # This is the baseline term
-        x_inter = (sigma_next / sigma_now) * latents - (alpha_next * phi_1) * noise_pred
+        # --- 3. SOLVER LOGIC (DPMSolver++) ---
+        
+        # A. Predict Clean Image (x0) - "Data Prediction"
+        # This is the core of DPMSolver++
+        pred_x0 = (latents - sigma_now * noise_pred) / alpha_now
 
         # B. Second Order Correction (Multistep)
-        # Only possible if we have history (prev_noise_pred)
+        # We adjust the NOISE vector using the history
         if prev_noise_pred is not None and prev_lambda is not None:
-            # Calculate ratio r for the 2nd order term
-            # r = h_current / h_previous
+            # h_prev = lambda_now - lambda_prev
             h_prev = lambda_now - prev_lambda
             r = h / h_prev
             
+            # DPM-Solver++ 2M Correction
             # D = (1 + 1/(2r)) * noise_now - (1/(2r)) * noise_prev
-            # Correction term adds curvature awareness
             D = (1 + 1.0 / (2.0 * r)) * noise_pred - (1.0 / (2.0 * r)) * prev_noise_pred
-            
-            # Apply correction
-            # Formula: - alpha_next * (exp(-h) - 1) * (D - noise_pred)
-            # This simplifies to replacing noise_pred with D in the original equation, 
-            # but usually implemented as an additive term.
-            
-            correction = 0.5 * (alpha_next * phi_1) * (noise_pred - prev_noise_pred) / r
-            # Note: Implementations vary slightly, this matches the standard 2M Taylor expansion approximation
-            
-            # More robust DPM-Solver++ 2M formula:
-            # x = (sigma_next/sigma_now) * latents - alpha_next * phi_1 * noise_pred 
-            #     - 0.5 * alpha_next * phi_1 * (noise_pred - prev_noise_pred)
-            # (Assuming step sizes are roughly similar, r approx 1. 
-            # The 'r' term handles unequal steps).
-            
-            # Exact formulation:
-            correction = alpha_next * phi_1 * (1.0 / (2.0 * r)) * (noise_pred - prev_noise_pred)
-            
-            latents_next = x_inter - correction
         else:
-            # First step (or no history): Fallback to First Order
-            latents_next = x_inter
+            # First Order (Euler)
+            D = noise_pred
+
+        # C. Update Equation
+        # x_next = alpha_next * x0 + sigma_next * D
+        # This assumes x0 is constant (First order on Data) and integrates the noise
+        latents_next = alpha_next * pred_x0 + sigma_next * D
 
         return latents_next, noise_pred, lambda_now

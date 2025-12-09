@@ -9,181 +9,165 @@ from torch.cuda.amp import autocast
 # Initialize Metric
 lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to("cuda")
 
-def compare_methods_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="cuda", save_dir="./final_results/full_comparison_grid.png"):
+def comparison_pipeline(pipe, dpm_handler, student, prompts, K_STEPS=4, DEVICE="cuda", save_dir = "./final_results/4_comparison_img.png"):
     """
-    4-Way Comparison Pipeline:
-    1. Teacher (50 Steps)
-    2. Simple DPM-Solver (4 Natural Steps)
-    3. Scheduled DPM (4 Learned Steps, No LoRA)
-    4. Scheduled DPM + LoRA (4 Learned Steps + Refiner)
+    Generates a 4-way comparison grid:
+    1. Teacher (50 step DDIM)
+    2. Simple DPM (4 step, fixed schedule)
+    3. Scheduled (4 step, learned schedule, No LoRA)
+    4. Scheduled + LoRA (4 step, learned schedule, Refiner at end)
+    
+    Prints natural vs. learned schedules for every prompt.
     """
-
-    # Standardize Seed for fair comparison
-    SEED = 42
-
-    # Containers for results
-    results = {
-        "Teacher": [],
-        "Simple DPM": [],
-        "Scheduled": [],
-        "Scheduled + LoRA": []
-    }
-
-    # Helper to decode latents to images
-    def decode_latents(latents):
+    def decode_latents(pipe, latents):
+        """Helper to decode latents into a displayable image."""
         latents = 1 / 0.18215 * latents
         img = pipe.vae.decode(latents).sample
         img = (img / 2 + 0.5).clamp(0, 1)
-        return img
+        return img.squeeze(0)
+    
+    SEED = 42
+    results = {k: [] for k in ["Teacher", "Simple DPM", "Scheduled", "Scheduled + LoRA"]}
 
-    print(f"Running evaluation on {len(prompts)} prompts...")
+    print(f"\nStarting 4-Way Evaluation on {len(prompts)} prompts...")
 
-    # Pre-encode prompts to save time
-    encoded_prompts = []
-    with torch.no_grad():
-        for p in prompts:
-            inputs = pipe.tokenizer(p, return_tensors="pt", padding="max_length", truncation=True).to(DEVICE)
-            encoded_prompts.append(pipe.text_encoder(inputs.input_ids)[0])
+    # 1. Get "Natural" DPM Schedule for comparison
+    dpm_sched = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    dpm_sched.set_timesteps(K_STEPS)
+    # Add t=0 implicitly for comparison with student's explicit end point
+    natural_steps = dpm_sched.timesteps.tolist() + [0]
+    print(f"Natural DPM Schedule (for {K_STEPS} steps): {natural_steps}\n")
+    
+    # Pre-compute Null Embedding for CFG
+    null_emb = pipe.text_encoder(
+        pipe.tokenizer("", return_tensors="pt", padding="max_length", truncation=True).input_ids.to(DEVICE)
+    )[0]
 
-    # Loop over prompts
-    for i, (prompt, text_emb) in enumerate(zip(prompts, encoded_prompts)):
-        print(f"  Prompt {i+1}: {prompt[:30]}...")
-
-        # Generator for this specific prompt (ensures same noise across methods)
-        g = torch.Generator(device=DEVICE).manual_seed(SEED + i)
-
-        # 1. TEACHER (50 Steps) ------------------------------------------------
-        # Ensure LoRA is OFF
-        if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
-        pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-
-        with torch.no_grad():
-            img_teacher = pipe(prompt, num_inference_steps=50, generator=g, output_type="pt").images[0]
-        results["Teacher"].append(img_teacher)
-
-        # 2. SIMPLE DPM SOLVER (4 Natural Steps) -------------------------------
-        # Ensure LoRA is OFF
-        if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-
-        # Reset Generator
-        g = torch.Generator(device=DEVICE).manual_seed(SEED + i)
-        with torch.no_grad():
-            img_dpm = pipe(prompt, num_inference_steps=K_STEPS, generator=g, output_type="pt").images[0]
-            natural_steps = pipe.scheduler.timesteps.tolist()
-        results["Simple DPM"].append(img_dpm)
-
-        print(f"    Natural DPM Steps: {natural_steps}")
-        # 3. & 4. SCHEDULED METHODS (Shared Initial Loop) ----------------------
-        # We run the custom loop twice: once with LoRA OFF, once with LoRA ON (at end)
-
-        # Prepare Inputs for Custom Loop
-        g = torch.Generator(device=DEVICE).manual_seed(SEED + i)
-        init_latents = randn_tensor((1, 4, 64, 64), device=DEVICE, generator=g, dtype=text_emb.dtype)
-
-        # --- Run Config 3: Scheduled (No LoRA) ---
-        if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+    # --- MAIN EVALUATION LOOP ---
+    for i, prompt in enumerate(prompts):
+        print(f"Processing Prompt {i+1}/{len(prompts)}: '{prompt[:30]}...'")
+        
+        # Prepare embeddings and common noise generators
+        g_seed = torch.Generator(device=DEVICE).manual_seed(SEED + i)
+        text_input = pipe.tokenizer(prompt, return_tensors="pt", padding="max_length", truncation=True).to(DEVICE)
+        text_emb = pipe.text_encoder(text_input.input_ids)[0]
+        cfg_text_emb = torch.cat([null_emb, text_emb])
+        
+        # Generate identical initial noise for all methods
+        init_latents = randn_tensor((1, 4, 64, 64), device=DEVICE, generator=g_seed, dtype=text_emb.dtype)
 
         with torch.no_grad(), autocast():
-            # Reset Loop State
-            schedule_history = []
+            # ============================================
+            # 1. Teacher (50 Steps DDIM)
+            # ============================================
+            if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+            pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+            # Use a fresh generator for the pipeline call to ensure deterministic noise
+            g_pipe = torch.Generator(device=DEVICE).manual_seed(SEED + i)
+            img = pipe(prompt, num_inference_steps=50, generator=g_pipe, output_type="pt").images[0]
+            results["Teacher"].append(img)
+
+            # ============================================
+            # 2. Simple DPM (4 Natural Steps)
+            # ============================================
+            if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+            pipe.scheduler.config.algorithm_type = "dpmsolver++"
+            pipe.scheduler.config.use_karras_sigmas = True
+            
+            g_pipe = torch.Generator(device=DEVICE).manual_seed(SEED + i)
+            img = pipe(prompt, num_inference_steps=K_STEPS, generator=g_pipe, output_type="pt").images[0]
+            results["Simple DPM"].append(img)
+
+            # ============================================
+            # 3. Scheduled (Learned Steps, NO LoRA)
+            # ============================================
+            if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
+            
             latents = init_latents.clone()
             t_curr = torch.full((1, 1), 1000.0, device=DEVICE)
-            schedule_history.append(t_curr.item())
             hx = None; prev_noise = None; prev_lambda = None
-
+            learned_steps = [t_curr.item()]
+            
             for k in range(K_STEPS):
-                # RNN Schedule Prediction
                 t_next, hx = student(latents, t_curr, hx)
-                if k < K_STEPS - 1:
-                    t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
-                else:
-                    t_next = torch.zeros_like(t_curr) # Force land
-                schedule_history.append(t_next.item())
-                # DPM Integration Step
+                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
+                else: t_next = torch.zeros_like(t_curr)
+                
+                learned_steps.append(t_next.item())
+
                 latents, prev_noise, prev_lambda = dpm_handler.step(
-                    latents, t_curr, t_next, text_emb,
+                    latents, t_curr, t_next, cfg_text_emb,
                     prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=7.5 # Use CFG for eval!
+                    guidance_scale=4.0
                 )
                 t_curr = t_next
+            
+            results["Scheduled"].append(decode_latents(pipe, latents))
+            print(f"  -> Learned Schedule (No LoRA): {[int(t) for t in learned_steps]}")
 
-            results["Scheduled"].append(decode_latents(latents).squeeze(0))
-
-        print(f"    Learned Schedule: {[int(s) for s in schedule_history]}")
-        # --- Run Config 4: Scheduled + LoRA ---
-        # Reset State for fresh run
-        if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
-
-        with torch.no_grad(), autocast():
+            # ============================================
+            # 4. Scheduled + LoRA (Refiner at End)
+            # ============================================
+            # Reset state for a clean run
             latents = init_latents.clone()
             t_curr = torch.full((1, 1), 1000.0, device=DEVICE)
             hx = None; prev_noise = None; prev_lambda = None
-
+            # Schedule might change slightly because LoRA changes latents at the last step
+            learned_steps_lora = [t_curr.item()] 
+            
             for k in range(K_STEPS):
-                # RNN Schedule Prediction
-                t_next, hx = student(latents, t_curr, hx)
-                if k < K_STEPS - 1:
-                    t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
-                else:
-                    t_next = torch.zeros_like(t_curr)
-
-                # CRITICAL: Enable LoRA ONLY for the final step
+                # Toggle LoRA: ON only for the final step
                 if k == K_STEPS - 1:
-                    pipe.unet.enable_adapter_layers()
+                    if hasattr(pipe.unet, "enable_adapter_layers"): pipe.unet.enable_adapter_layers()
                 else:
-                    pipe.unet.disable_adapter_layers()
+                    if hasattr(pipe.unet, "disable_adapter_layers"): pipe.unet.disable_adapter_layers()
 
-                # DPM Integration Step
+                t_next, hx = student(latents, t_curr, hx)
+                if k < K_STEPS - 1: t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
+                else: t_next = torch.zeros_like(t_curr)
+                
+                learned_steps_lora.append(t_next.item())
+
                 latents, prev_noise, prev_lambda = dpm_handler.step(
-                    latents, t_curr, t_next, text_emb,
+                    latents, t_curr, t_next, cfg_text_emb,
                     prev_noise_pred=prev_noise, prev_lambda=prev_lambda,
-                    guidance_scale=7.5
+                    guidance_scale=4.0
                 )
                 t_curr = t_next
+            
+            results["Scheduled + LoRA"].append(decode_latents(pipe, latents))
+            # print(f"  -> Learned Schedule (+ LoRA):  {[int(t) for t in learned_steps_lora]}")
 
-            results["Scheduled + LoRA"].append(decode_latents(latents).squeeze(0))
-
-    # --- METRICS CALCULATION ---
+    # --- Metrics & Visualization ---
     print("\nComputing LPIPS Scores...")
-
-    # Convert lists to tensors
-    for key in results:
-        results[key] = torch.stack(results[key]).to(DEVICE)
-
-    # Calculate vs Teacher
+    for k, v in results.items(): results[k] = torch.stack(v).to(DEVICE)
+    
     scores = {}
     for method in ["Simple DPM", "Scheduled", "Scheduled + LoRA"]:
-        score = lpips_metric(results[method], results["Teacher"]).item()
-        scores[method] = score
-
+        scores[method] = lpips_metric(results[method], results["Teacher"]).item()
+        
     print(f"\n=== LPIPS Results (Lower is Better) ===")
     print(f"Simple DPM (Baseline):   {scores['Simple DPM']:.4f}")
     print(f"Scheduled (Ablation):    {scores['Scheduled']:.4f}")
     print(f"Scheduled + LoRA (Full): {scores['Scheduled + LoRA']:.4f}")
 
-    # --- VISUALIZATION ---
-    print("Generating Grid Plot...")
+    print("Generating 4-Column Grid Plot...")
+    cols = ["Teacher", "Simple DPM", "Scheduled", "Scheduled + LoRA"]
     n_prompts = len(prompts)
     fig, axs = plt.subplots(n_prompts, 4, figsize=(16, 4 * n_prompts))
-
     if n_prompts == 1: axs = axs.reshape(1, -1)
 
-    # Column Titles
-    cols = ["Teacher", "Simple DPM", "Scheduled", "Sched + LoRA"]
-    for ax, col in zip(axs[0], cols):
-        ax.set_title(col, fontsize=14, fontweight='bold')
+    for j, col in enumerate(cols): axs[0, j].set_title(col, fontsize=12, fontweight='bold')
 
-    # Plot Images
     for i in range(n_prompts):
         for j, method in enumerate(cols):
-            # Convert to numpy [H, W, C]
             img = results[method][i].cpu().permute(1, 2, 0).numpy()
             axs[i, j].imshow(img)
             axs[i, j].axis("off")
-
+            
     plt.tight_layout()
     plt.savefig(save_dir)
     plt.show()
 
-    return scores
+

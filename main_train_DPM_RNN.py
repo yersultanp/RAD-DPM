@@ -17,7 +17,7 @@ from train.train_step import train_one_step, generate_teacher_target
 from losses import image_loss, HybridLatentLoss
 from models.refiner import attach_refiner_lora
 from eval.visualize_schedule import plot_scheduler_training_history
-from eval.plot_results import compare_methods_pipeline
+from eval.plot_results import comparison_pipeline
 
 def main():
     student = RecurrentScheduler(SchedulerConfig.K_STEPS).to(TrainConfig.DEVICE)
@@ -43,15 +43,8 @@ def main():
         "A dusty desert road stretching into the horizon",
         "A delicious pepperoni pizza with melting cheese",
         "A vintage typewriter sitting on an old wooden desk",
+        "A shiny red sports car driving on a coastal highway",
     ]
-    #     "A shiny red sports car driving on a coastal highway",
-    #     "A portrait of an old fisherman with a weathered face",
-    #     "A professional headshot of a smiling woman in business attire",
-    #     "A renaissance style oil painting of a young princess",
-    #     "A cyberpunk android girl with glowing circuitry on her face",
-    #     "A flat vector illustration of a rocket ship launching",
-    #     "A watercolor painting of a cozy cafe in Paris",
-    # ]
 
     train_data = generate_teacher_target(pipe, TRAIN_PROMPTS, TrainConfig.DEVICE)
 
@@ -93,7 +86,7 @@ def main():
 
                     if k < SchedulerConfig.K_STEPS - 1:
                         t_next, hx = student(student_latents, t_curr, hx)
-                        t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
+                        t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
                     else:
                         t_next = torch.zeros_like(t_curr)
 
@@ -176,7 +169,7 @@ def main():
                     for k in range(SchedulerConfig.K_STEPS - 1): # Run all but last
                         t_next, hx = student(latents, t_curr, hx)
                         # Clamp logic
-                        t_next = torch.min(t_next, t_curr - 1).clamp(min=0)
+                        t_next = torch.min(t_next, t_curr - 1).clamp(min=50)
                         # Step returns: New Latents, Current Noise, Current Lambda
                         latents, curr_noise, curr_lambda = dpm_handler.step(
                             latents, t_curr, t_next, text_emb,
@@ -232,7 +225,7 @@ def main():
     k_idx = random.sample([i for i in range(len(TRAIN_PROMPTS))], k)
     for i in k_idx:
         schedule_history_sample = [epoch_schedule[i] for epoch_schedule in schedule_history]
-        plot_scheduler_training_history(loss_history, schedule_history_sample, SchedulerConfig.K_STEPS, save_dir="./final_results")
+        plot_scheduler_training_history(loss_history, schedule_history_sample, save_dir="./final_results/")
 
     EVAL_PROMPTS = [
         "A majestic lion roaring in the savannah at sunset",
@@ -245,4 +238,7 @@ def main():
         "A delicious bowl of ramen with various toppings",
     ]
     # Compare Methods Pipeline
-    compare_methods_pipeline(pipe, dpm_handler, student, EVAL_PROMPTS, K_STEPS=SchedulerConfig.K_STEPS, DEVICE=TrainConfig.DEVICE, save_dir="./final_results/full_comparison_grid.png")
+    comparison_pipeline(pipe, dpm_handler, student, EVAL_PROMPTS, K_STEPS=SchedulerConfig.K_STEPS, DEVICE=TrainConfig.DEVICE, save_dir="./final_results/full_comparison_grid.png")
+
+if __name__ == "__main__":
+    main()

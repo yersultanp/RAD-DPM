@@ -169,7 +169,6 @@ def main():
                 t_curr = student(SchedulerConfig.K_STEPS - 1, latents)
                 t_next = torch.zeros_like(t_curr)
 
-                # FIX: Blind Training. Use null_emb instead of text_emb.
                 # This forces LoRA to look at pixels, avoiding prompt overfitting.
                 # We use the diff_handler to execute the step WITH gradients.
                 refined_latents = diff_handler.step(latents, t_curr, t_next, null_emb, guidance_scale=1.0)
